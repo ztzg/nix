@@ -281,8 +281,10 @@ void LocalStore::findRoots(const Path & path, unsigned char type, Roots & roots)
 }
 
 
-void LocalStore::findRootsNoTemp(Roots & roots, bool censor)
+void LocalStore::findRootsNoTempNoExternalDaemon(Roots & roots, bool censor)
 {
+    debug("Can’t connect to the tracing daemon socket, fallback to the internal trace");
+
     /* Process direct roots in {gcroots,profiles}. */
     findRoots(stateDir + "/" + gcRootsDir, DT_UNKNOWN, roots);
     findRoots(stateDir + "/profiles", DT_UNKNOWN, roots);
@@ -294,9 +296,8 @@ void LocalStore::findRootsNoTemp(Roots & roots, bool censor)
 }
 
 
-Roots LocalStore::findRootsNoExternalDaemon(bool censor)
+Roots LocalStore::findRoots(bool censor)
 {
-    debug("Can’t connect to the tracing daemon socket, fallback to the internal trace");
     Roots roots;
     findRootsNoTemp(roots, censor);
 
@@ -306,7 +307,7 @@ Roots LocalStore::findRootsNoExternalDaemon(bool censor)
     return roots;
 }
 
-Roots LocalStore::findRoots(bool censor)
+void LocalStore::findRootsNoTemp(Roots & roots, bool censor)
 {
 
     auto fd = AutoCloseFD(socket(PF_UNIX, SOCK_STREAM
@@ -329,9 +330,7 @@ Roots LocalStore::findRoots(bool censor)
     strcpy(addr.sun_path, socketPath.c_str());
 
     if (::connect(fd.get(), (struct sockaddr *) &addr, sizeof(addr)) == -1)
-        return findRootsNoExternalDaemon(censor);
-
-    Roots roots;
+        return findRootsNoTempNoExternalDaemon(roots, censor);
 
     try {
         while (true) {
@@ -354,7 +353,7 @@ Roots LocalStore::findRoots(bool censor)
     } catch (EndOfFile &) {
     }
 
-    return roots;
+    findRuntimeRoots(roots, censor);
 }
 
 typedef std::unordered_map<Path, std::unordered_set<std::string>> UncheckedRoots;
