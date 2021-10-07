@@ -6,6 +6,7 @@ nix_tests = \
   gc-concurrent.sh \
   gc-non-blocking.sh \
   gc-auto.sh \
+  gc-external-daemon.sh \
   referrers.sh user-envs.sh logging.sh nix-build.sh misc.sh fixed.sh \
   gc-runtime.sh check-refs.sh filter-source.sh \
   local-store.sh remote-store.sh export.sh export-graph.sh \
