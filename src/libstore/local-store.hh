@@ -248,8 +248,6 @@ private:
 
     void findRootsNoTempNoExternalDaemon(Roots & roots, bool censor);
 
-    void findRuntimeRoots(Roots & roots, bool censor);
-
     Path createTempDirInStore();
 
     void checkDerivationOutputs(const StorePath & drvPath, const Derivation & drv);
