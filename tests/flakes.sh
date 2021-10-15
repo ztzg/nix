@@ -5,11 +5,6 @@ if [[ -z $(type -p git) ]]; then
     exit 99
 fi
 
-if [[ -z $(type -p hg) ]]; then
-    echo "Mercurial not installed; skipping flake tests"
-    exit 99
-fi
-
 clearStore
 rm -rf $TEST_HOME/.cache $TEST_HOME/.config
 
@@ -266,6 +261,8 @@ cat > $flake3Dir/flake.nix <<EOF
       mkDerivation {
         inherit system;
         name = "fnord";
+        dummy = builtins.readFile (builtins.path { name = "source"; path = ./.; filter = path: type: baseNameOf path == "config.nix"; } + "/config.nix");
+        dummy2 = builtins.readFile (builtins.path { name = "source"; path = inputs.flake1; filter = path: type: baseNameOf path == "simple.nix"; } + "/simple.nix");
         buildCommand = ''
           cat \${inputs.nonFlake}/README.md > \$out
         '';
@@ -392,12 +389,14 @@ git -C $templatesDir commit -m 'Initial'
 
 nix flake check templates
 nix flake show templates
+nix flake show templates --json | jq
 
 (cd $flake7Dir && nix flake init)
 (cd $flake7Dir && nix flake init) # check idempotence
 git -C $flake7Dir add flake.nix
 nix flake check $flake7Dir
 nix flake show $flake7Dir
+nix flake show $flake7Dir --json | jq
 git -C $flake7Dir commit -a -m 'Initial'
 
 # Test 'nix flake new'.
@@ -577,45 +576,52 @@ nix build -o $TEST_ROOT/result git+file://$flakeGitBare
 
 # Test Mercurial flakes.
 rm -rf $flake5Dir
-hg init $flake5Dir
+mkdir $flake5Dir
 
 cat > $flake5Dir/flake.nix <<EOF
 {
   outputs = { self, flake1 }: {
     defaultPackage.$system = flake1.defaultPackage.$system;
-
     expr = assert builtins.pathExists ./flake.lock; 123;
   };
 }
 EOF
 
-hg add $flake5Dir/flake.nix
-hg commit --config ui.username=foobar@example.org $flake5Dir -m 'Initial commit'
+if [[ -n $(type -p hg) ]]; then
+    hg init $flake5Dir
 
-nix build -o $TEST_ROOT/result hg+file://$flake5Dir
-[[ -e $TEST_ROOT/result/hello ]]
+    hg add $flake5Dir/flake.nix
+    hg commit --config ui.username=foobar@example.org $flake5Dir -m 'Initial commit'
 
-(! nix flake metadata --json hg+file://$flake5Dir | jq -e -r .revision)
+    nix build -o $TEST_ROOT/result hg+file://$flake5Dir
+    [[ -e $TEST_ROOT/result/hello ]]
 
-nix eval hg+file://$flake5Dir#expr
+    (! nix flake metadata --json hg+file://$flake5Dir | jq -e -r .revision)
 
-nix eval hg+file://$flake5Dir#expr
+    nix eval hg+file://$flake5Dir#expr
 
-(! nix eval hg+file://$flake5Dir#expr --no-allow-dirty)
+    nix eval hg+file://$flake5Dir#expr
 
-(! nix flake metadata --json hg+file://$flake5Dir | jq -e -r .revision)
+    (! nix eval hg+file://$flake5Dir#expr --no-allow-dirty)
 
-hg commit --config ui.username=foobar@example.org $flake5Dir -m 'Add lock file'
+    (! nix flake metadata --json hg+file://$flake5Dir | jq -e -r .revision)
 
-nix flake metadata --json hg+file://$flake5Dir --refresh | jq -e -r .revision
-nix flake metadata --json hg+file://$flake5Dir
-[[ $(nix flake metadata --json hg+file://$flake5Dir | jq -e -r .revCount) = 1 ]]
+    hg commit --config ui.username=foobar@example.org $flake5Dir -m 'Add lock file'
 
-nix build -o $TEST_ROOT/result hg+file://$flake5Dir --no-registries --no-allow-dirty
-nix build -o $TEST_ROOT/result hg+file://$flake5Dir --no-use-registries --no-allow-dirty
+    nix flake metadata --json hg+file://$flake5Dir --refresh | jq -e -r .revision
+    nix flake metadata --json hg+file://$flake5Dir
+    [[ $(nix flake metadata --json hg+file://$flake5Dir | jq -e -r .revCount) = 1 ]]
 
-# Test tarball flakes
-tar cfz $TEST_ROOT/flake.tar.gz -C $TEST_ROOT --exclude .hg flake5
+    nix build -o $TEST_ROOT/result hg+file://$flake5Dir --no-registries --no-allow-dirty
+    nix build -o $TEST_ROOT/result hg+file://$flake5Dir --no-use-registries --no-allow-dirty
+fi
+
+# Test path flakes.
+rm -rf $flake5Dir/.hg $flake5Dir/flake.lock
+nix flake lock path://$flake5Dir
+
+# Test tarball flakes.
+tar cfz $TEST_ROOT/flake.tar.gz -C $TEST_ROOT flake5
 
 nix build -o $TEST_ROOT/result file://$TEST_ROOT/flake.tar.gz
 
@@ -630,8 +636,8 @@ nix build -o $TEST_ROOT/result "file://$TEST_ROOT/flake.tar.gz?narHash=sha256-qQ
 
 # Test --override-input.
 git -C $flake3Dir reset --hard
-nix flake lock $flake3Dir --override-input flake2/flake1 flake5 -vvvvv
-[[ $(jq .nodes.flake1_2.locked.url $flake3Dir/flake.lock) =~ flake5 ]]
+nix flake lock $flake3Dir --override-input flake2/flake1 file://$TEST_ROOT/flake.tar.gz -vvvvv
+[[ $(jq .nodes.flake1_2.locked.url $flake3Dir/flake.lock) =~ flake.tar.gz ]]
 
 nix flake lock $flake3Dir --override-input flake2/flake1 flake1
 [[ $(jq -r .nodes.flake1_2.locked.rev $flake3Dir/flake.lock) =~ $hash2 ]]
@@ -764,7 +770,7 @@ cat > $flakeFollowsA/flake.nix <<EOF
 {
     description = "Flake A";
     inputs = {
-        B.url = "path:./../../flakeB";
+        B.url = "path:../flakeB";
     };
     outputs = { ... }: {};
 }
@@ -772,7 +778,7 @@ EOF
 
 git -C $flakeFollowsA add flake.nix
 
-nix flake lock $flakeFollowsA 2>&1 | grep 'this is a security violation'
+nix flake lock $flakeFollowsA 2>&1 | grep 'points outside'
 
 # Test flake in store does not evaluate
 rm -rf $badFlakeDir

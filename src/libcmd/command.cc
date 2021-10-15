@@ -120,7 +120,7 @@ void BuiltPathsCommand::run(ref<Store> store)
             // XXX: This only computes the store path closure, ignoring
             // intermediate realisations
             StorePathSet pathsRoots, pathsClosure;
-            for (auto & root: paths) {
+            for (auto & root : paths) {
                 auto rootFromThis = root.outPaths();
                 pathsRoots.insert(rootFromThis.begin(), rootFromThis.end());
             }
@@ -138,17 +138,20 @@ StorePathsCommand::StorePathsCommand(bool recursive)
 {
 }
 
-void StorePathsCommand::run(ref<Store> store, BuiltPaths paths)
+void StorePathsCommand::run(ref<Store> store, BuiltPaths && paths)
 {
-    StorePaths storePaths;
-    for (auto& builtPath : paths)
-        for (auto& p : builtPath.outPaths())
-            storePaths.push_back(p);
+    StorePathSet storePaths;
+    for (auto & builtPath : paths)
+        for (auto & p : builtPath.outPaths())
+            storePaths.insert(p);
 
-    run(store, std::move(storePaths));
+    auto sorted = store->topoSortPaths(storePaths);
+    std::reverse(sorted.begin(), sorted.end());
+
+    run(store, std::move(sorted));
 }
 
-void StorePathCommand::run(ref<Store> store, std::vector<StorePath> storePaths)
+void StorePathCommand::run(ref<Store> store, std::vector<StorePath> && storePaths)
 {
     if (storePaths.size() != 1)
         throw UsageError("this command requires exactly one store path");
@@ -200,10 +203,10 @@ void MixProfile::updateProfile(const BuiltPaths & buildables)
 
     for (auto & buildable : buildables) {
         std::visit(overloaded {
-            [&](BuiltPath::Opaque bo) {
+            [&](const BuiltPath::Opaque & bo) {
                 result.push_back(bo.path);
             },
-            [&](BuiltPath::Built bfd) {
+            [&](const BuiltPath::Built & bfd) {
                 for (auto & output : bfd.outputs) {
                     result.push_back(output.second);
                 }

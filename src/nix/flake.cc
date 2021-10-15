@@ -131,8 +131,18 @@ static void enumerateOutputs(EvalState & state, Value & vFlake,
 
     state.forceAttrs(*aOutputs->value);
 
-    for (auto & attr : *aOutputs->value->attrs)
-        callback(attr.name, *attr.value, *attr.pos);
+    auto sHydraJobs = state.symbols.create("hydraJobs");
+
+    /* Hack: ensure that hydraJobs is evaluated before anything
+       else. This way we can disable IFD for hydraJobs and then enable
+       it for other outputs. */
+    if (auto attr = aOutputs->value->attrs->get(sHydraJobs))
+        callback(attr->name, *attr->value, *attr->pos);
+
+    for (auto & attr : *aOutputs->value->attrs) {
+        if (attr.name != sHydraJobs)
+            callback(attr.name, *attr.value, *attr.pos);
+    }
 }
 
 struct CmdFlakeMetadata : FlakeCommand, MixJSON
@@ -269,7 +279,10 @@ struct CmdFlakeCheck : FlakeCommand
 
     void run(nix::ref<nix::Store> store) override
     {
-        settings.readOnlyMode = !build;
+        if (!build) {
+            settings.readOnlyMode = true;
+            evalSettings.enableImportFromDerivation.setDefault(false);
+        }
 
         auto state = getEvalState();
 
@@ -333,10 +346,10 @@ struct CmdFlakeCheck : FlakeCommand
         auto checkOverlay = [&](const std::string & attrPath, Value & v, const Pos & pos) {
             try {
                 state->forceValue(v, pos);
-                if (!v.isLambda() || v.lambda.fun->matchAttrs || std::string(v.lambda.fun->arg) != "final")
+                if (!v.isLambda() || v.lambda.fun->hasFormals() || std::string(v.lambda.fun->arg) != "final")
                     throw Error("overlay does not take an argument named 'final'");
                 auto body = dynamic_cast<ExprLambda *>(v.lambda.fun->body);
-                if (!body || body->matchAttrs || std::string(body->arg) != "prev")
+                if (!body || body->hasFormals() || std::string(body->arg) != "prev")
                     throw Error("overlay does not take an argument named 'prev'");
                 // FIXME: if we have a 'nixpkgs' input, use it to
                 // evaluate the overlay.
@@ -350,7 +363,7 @@ struct CmdFlakeCheck : FlakeCommand
             try {
                 state->forceValue(v, pos);
                 if (v.isLambda()) {
-                    if (!v.lambda.fun->matchAttrs || !v.lambda.fun->formals->ellipsis)
+                    if (!v.lambda.fun->hasFormals() || !v.lambda.fun->formals->ellipsis)
                         throw Error("module must match an open attribute set ('{ config, ... }')");
                 } else if (v.type() == nAttrs) {
                     for (auto & attr : *v.attrs)
@@ -381,9 +394,13 @@ struct CmdFlakeCheck : FlakeCommand
 
                 for (auto & attr : *v.attrs) {
                     state->forceAttrs(*attr.value, *attr.pos);
-                    if (!state->isDerivation(*attr.value))
-                        checkHydraJobs(attrPath + "." + (std::string) attr.name,
-                            *attr.value, *attr.pos);
+                    auto attrPath2 = attrPath + "." + (std::string) attr.name;
+                    if (state->isDerivation(*attr.value)) {
+                        Activity act(*logger, lvlChatty, actUnknown,
+                            fmt("checking Hydra job '%s'", attrPath2));
+                        checkDerivation(attrPath2, *attr.value, *attr.pos);
+                    } else
+                        checkHydraJobs(attrPath2, *attr.value, *attr.pos);
                 }
 
             } catch (Error & e) {
@@ -447,8 +464,8 @@ struct CmdFlakeCheck : FlakeCommand
                 if (!v.isLambda())
                     throw Error("bundler must be a function");
                 if (!v.lambda.fun->formals ||
-                    v.lambda.fun->formals->argNames.find(state->symbols.create("program")) == v.lambda.fun->formals->argNames.end() ||
-                    v.lambda.fun->formals->argNames.find(state->symbols.create("system")) == v.lambda.fun->formals->argNames.end())
+                    !v.lambda.fun->formals->argNames.count(state->symbols.create("program")) ||
+                    !v.lambda.fun->formals->argNames.count(state->symbols.create("system")))
                     throw Error("bundler must take formal arguments 'program' and 'system'");
             } catch (Error & e) {
                 e.addTrace(pos, hintfmt("while checking the template '%s'", attrPath));
@@ -469,6 +486,8 @@ struct CmdFlakeCheck : FlakeCommand
                         fmt("checking flake output '%s'", name));
 
                     try {
+                        evalSettings.enableImportFromDerivation.setDefault(name != "hydraJobs");
+
                         state->forceValue(vOutput, pos);
 
                         if (name == "checks") {
@@ -603,7 +622,7 @@ struct CmdFlakeCheck : FlakeCommand
             store->buildPaths(drvPaths);
         }
         if (hasErrors)
-            throw Error("Some errors were encountered during the evaluation");
+            throw Error("some errors were encountered during the evaluation");
     }
 };
 
@@ -846,7 +865,7 @@ struct CmdFlakeArchive : FlakeCommand, MixJSON, MixDryRun
     }
 };
 
-struct CmdFlakeShow : FlakeCommand
+struct CmdFlakeShow : FlakeCommand, MixJSON
 {
     bool showLegacy = false;
 
@@ -873,52 +892,69 @@ struct CmdFlakeShow : FlakeCommand
 
     void run(nix::ref<nix::Store> store) override
     {
+        evalSettings.enableImportFromDerivation.setDefault(false);
+
         auto state = getEvalState();
         auto flake = std::make_shared<LockedFlake>(lockFlake());
 
-        std::function<void(eval_cache::AttrCursor & visitor, const std::vector<Symbol> & attrPath, const std::string & headerPrefix, const std::string & nextPrefix)> visit;
+        std::function<nlohmann::json(
+            eval_cache::AttrCursor & visitor,
+            const std::vector<Symbol> & attrPath,
+            const std::string & headerPrefix,
+            const std::string & nextPrefix)> visit;
 
-        visit = [&](eval_cache::AttrCursor & visitor, const std::vector<Symbol> & attrPath, const std::string & headerPrefix, const std::string & nextPrefix)
+        visit = [&](
+            eval_cache::AttrCursor & visitor,
+            const std::vector<Symbol> & attrPath,
+            const std::string & headerPrefix,
+            const std::string & nextPrefix)
+            -> nlohmann::json
         {
+            auto j = nlohmann::json::object();
+
             Activity act(*logger, lvlInfo, actUnknown,
                 fmt("evaluating '%s'", concatStringsSep(".", attrPath)));
             try {
                 auto recurse = [&]()
                 {
-                    logger->cout("%s", headerPrefix);
+                    if (!json)
+                        logger->cout("%s", headerPrefix);
                     auto attrs = visitor.getAttrs();
                     for (const auto & [i, attr] : enumerate(attrs)) {
                         bool last = i + 1 == attrs.size();
                         auto visitor2 = visitor.getAttr(attr);
                         auto attrPath2(attrPath);
                         attrPath2.push_back(attr);
-                        visit(*visitor2, attrPath2,
+                        auto j2 = visit(*visitor2, attrPath2,
                             fmt(ANSI_GREEN "%s%s" ANSI_NORMAL ANSI_BOLD "%s" ANSI_NORMAL, nextPrefix, last ? treeLast : treeConn, attr),
                             nextPrefix + (last ? treeNull : treeLine));
+                        if (json) j.emplace(attr, std::move(j2));
                     }
                 };
 
                 auto showDerivation = [&]()
                 {
                     auto name = visitor.getAttr(state->sName)->getString();
-
-                    /*
-                    std::string description;
-
-                    if (auto aMeta = visitor.maybeGetAttr("meta")) {
-                        if (auto aDescription = aMeta->maybeGetAttr("description"))
-                            description = aDescription->getString();
+                    if (json) {
+                        std::optional<std::string> description;
+                        if (auto aMeta = visitor.maybeGetAttr("meta")) {
+                            if (auto aDescription = aMeta->maybeGetAttr("description"))
+                                description = aDescription->getString();
+                        }
+                        j.emplace("type", "derivation");
+                        j.emplace("name", name);
+                        if (description)
+                            j.emplace("description", *description);
+                    } else {
+                        logger->cout("%s: %s '%s'",
+                            headerPrefix,
+                            attrPath.size() == 2 && attrPath[0] == "devShell" ? "development environment" :
+                            attrPath.size() >= 2 && attrPath[0] == "devShells" ? "development environment" :
+                            attrPath.size() == 3 && attrPath[0] == "checks" ? "derivation" :
+                            attrPath.size() >= 1 && attrPath[0] == "hydraJobs" ? "derivation" :
+                            "package",
+                            name);
                     }
-                    */
-
-                    logger->cout("%s: %s '%s'",
-                        headerPrefix,
-                        attrPath.size() == 2 && attrPath[0] == "devShell" ? "development environment" :
-                        attrPath.size() >= 2 && attrPath[0] == "devShells" ? "development environment" :
-                        attrPath.size() == 3 && attrPath[0] == "checks" ? "derivation" :
-                        attrPath.size() >= 1 && attrPath[0] == "hydraJobs" ? "derivation" :
-                        "package",
-                        name);
                 };
 
                 if (attrPath.size() == 0
@@ -962,7 +998,7 @@ struct CmdFlakeShow : FlakeCommand
                     if (attrPath.size() == 1)
                         recurse();
                     else if (!showLegacy)
-                        logger->cout("%s: " ANSI_YELLOW "omitted" ANSI_NORMAL " (use '--legacy' to show)", headerPrefix);
+                        logger->warn(fmt("%s: " ANSI_WARNING "omitted" ANSI_NORMAL " (use '--legacy' to show)", headerPrefix));
                     else {
                         if (visitor.isDerivation())
                             showDerivation();
@@ -979,7 +1015,11 @@ struct CmdFlakeShow : FlakeCommand
                     auto aType = visitor.maybeGetAttr("type");
                     if (!aType || aType->getString() != "app")
                         throw EvalError("not an app definition");
-                    logger->cout("%s: app", headerPrefix);
+                    if (json) {
+                        j.emplace("type", "app");
+                    } else {
+                        logger->cout("%s: app", headerPrefix);
+                    }
                 }
 
                 else if (
@@ -987,27 +1027,40 @@ struct CmdFlakeShow : FlakeCommand
                     (attrPath.size() == 2 && attrPath[0] == "templates"))
                 {
                     auto description = visitor.getAttr("description")->getString();
-                    logger->cout("%s: template: " ANSI_BOLD "%s" ANSI_NORMAL, headerPrefix, description);
+                    if (json) {
+                        j.emplace("type", "template");
+                        j.emplace("description", description);
+                    } else {
+                        logger->cout("%s: template: " ANSI_BOLD "%s" ANSI_NORMAL, headerPrefix, description);
+                    }
                 }
 
                 else {
-                    logger->cout("%s: %s",
-                        headerPrefix,
+                    auto [type, description] =
                         (attrPath.size() == 1 && attrPath[0] == "overlay")
-                        || (attrPath.size() == 2 && attrPath[0] == "overlays") ? "Nixpkgs overlay" :
-                        attrPath.size() == 2 && attrPath[0] == "nixosConfigurations" ? "NixOS configuration" :
-                        attrPath.size() == 2 && attrPath[0] == "nixosModules" ? "NixOS module" :
-                        ANSI_YELLOW "unknown" ANSI_NORMAL);
+                        || (attrPath.size() == 2 && attrPath[0] == "overlays") ? std::make_pair("nixpkgs-overlay", "Nixpkgs overlay") :
+                        attrPath.size() == 2 && attrPath[0] == "nixosConfigurations" ? std::make_pair("nixos-configuration", "NixOS configuration") :
+                        attrPath.size() == 2 && attrPath[0] == "nixosModules" ? std::make_pair("nixos-module", "NixOS module") :
+                        std::make_pair("unknown", "unknown");
+                    if (json) {
+                        j.emplace("type", type);
+                    } else {
+                        logger->cout("%s: " ANSI_WARNING "%s" ANSI_NORMAL, headerPrefix, description);
+                    }
                 }
             } catch (EvalError & e) {
                 if (!(attrPath.size() > 0 && attrPath[0] == "legacyPackages"))
                     throw;
             }
+
+            return j;
         };
 
         auto cache = openEvalCache(*state, flake);
 
-        visit(*cache->getRoot(), {}, fmt(ANSI_BOLD "%s" ANSI_NORMAL, flake->flake.lockedRef), "");
+        auto j = visit(*cache->getRoot(), {}, fmt(ANSI_BOLD "%s" ANSI_NORMAL, flake->flake.lockedRef), "");
+        if (json)
+            logger->cout("%s", j.dump());
     }
 };
 

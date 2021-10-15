@@ -82,9 +82,20 @@ struct LegacySSHStore : public virtual LegacySSHStoreConfig, public virtual Stor
             conn->to << SERVE_MAGIC_1 << SERVE_PROTOCOL_VERSION;
             conn->to.flush();
 
-            unsigned int magic = readInt(conn->from);
-            if (magic != SERVE_MAGIC_2)
-                throw Error("protocol mismatch with 'nix-store --serve' on '%s'", host);
+            StringSink saved;
+            try {
+                TeeSource tee(conn->from, saved);
+                unsigned int magic = readInt(tee);
+                if (magic != SERVE_MAGIC_2)
+                    throw Error("'nix-store --serve' protocol mismatch from '%s'", host);
+            } catch (SerialisationError & e) {
+                /* In case the other side is waiting for our input,
+                   close it. */
+                conn->sshConn->in.close();
+                auto msg = conn->from.drain();
+                throw Error("'nix-store --serve' protocol mismatch from '%s', got '%s'",
+                    host, chomp(*saved.s + msg));
+            }
             conn->remoteVersion = readInt(conn->from);
             if (GET_PROTOCOL_MAJOR(conn->remoteVersion) != 0x200)
                 throw Error("unsupported 'nix-store --serve' protocol version on '%s'", host);
@@ -237,6 +248,10 @@ private:
             conn.to
                 << settings.buildRepeat
                 << settings.enforceDeterminism;
+
+        if (GET_PROTOCOL_MINOR(conn.remoteVersion) >= 7) {
+            conn.to << ((int) settings.keepFailed);
+        }
     }
 
 public:
@@ -279,10 +294,10 @@ public:
         for (auto & p : drvPaths) {
             auto sOrDrvPath = StorePathWithOutputs::tryFromDerivedPath(p);
             std::visit(overloaded {
-                [&](StorePathWithOutputs s) {
+                [&](const StorePathWithOutputs & s) {
                     ss.push_back(s.to_string(*this));
                 },
-                [&](StorePath drvPath) {
+                [&](const StorePath & drvPath) {
                     throw Error("wanted to fetch '%s' but the legacy ssh protocol doesn't support merely substituting drv files via the build paths command. It would build them instead. Try using ssh-ng://", printStorePath(drvPath));
                 },
             }, sOrDrvPath);

@@ -4,6 +4,7 @@
 #include "finally.hh"
 #include "serialise.hh"
 
+#include <array>
 #include <cctype>
 #include <cerrno>
 #include <climits>
@@ -906,7 +907,7 @@ int Pid::wait()
             return status;
         }
         if (errno != EINTR)
-            throw SysError("cannot get child exit status");
+            throw SysError("cannot get exit status of PID %d", pid);
         checkInterrupt();
     }
 }
@@ -942,9 +943,6 @@ void killUser(uid_t uid)
        users to which the current process can send signals.  So we
        fork a process, switch to uid, and send a mass kill. */
 
-    ProcessOptions options;
-    options.allowVfork = false;
-
     Pid pid = startProcess([&]() {
 
         if (setuid(uid) == -1)
@@ -967,7 +965,7 @@ void killUser(uid_t uid)
         }
 
         _exit(0);
-    }, options);
+    });
 
     int status = pid.wait();
     if (status != 0)
@@ -1037,17 +1035,10 @@ std::vector<char *> stringsToCharPtrs(const Strings & ss)
     return res;
 }
 
-// Output = "standard out" output stream
 string runProgram(Path program, bool searchPath, const Strings & args,
     const std::optional<std::string> & input)
 {
-    RunOptions opts(program, args);
-    opts.searchPath = searchPath;
-    // This allows you to refer to a program with a pathname relative to the
-    // PATH variable.
-    opts.input = input;
-
-    auto res = runProgram(opts);
+    auto res = runProgram(RunOptions {.program = program, .searchPath = searchPath, .args = args, .input = input});
 
     if (!statusOk(res.first))
         throw ExecError(res.first, fmt("program '%1%' %2%", program, statusToString(res.first)));
@@ -1056,9 +1047,8 @@ string runProgram(Path program, bool searchPath, const Strings & args,
 }
 
 // Output = error code + "standard out" output stream
-std::pair<int, std::string> runProgram(const RunOptions & options_)
+std::pair<int, std::string> runProgram(RunOptions && options)
 {
-    RunOptions options(options_);
     StringSink sink;
     options.standardOut = &sink;
 
@@ -1096,8 +1086,7 @@ void runProgram2(const RunOptions & options)
     // vfork implies that the environment of the main process and the fork will
     // be shared (technically this is undefined, but in practice that's the
     // case), so we can't use it if we alter the environment
-    if (options.environment)
-        processOptions.allowVfork = false;
+    processOptions.allowVfork = !options.environment;
 
     /* Fork. */
     Pid pid = startProcess([&]() {
@@ -1697,16 +1686,7 @@ AutoCloseFD createUnixDomainSocket(const Path & path, mode_t mode)
 
     closeOnExec(fdSocket.get());
 
-    struct sockaddr_un addr;
-    addr.sun_family = AF_UNIX;
-    if (path.size() + 1 >= sizeof(addr.sun_path))
-        throw Error("socket path '%1%' is too long", path);
-    strcpy(addr.sun_path, path.c_str());
-
-    unlink(path.c_str());
-
-    if (bind(fdSocket.get(), (struct sockaddr *) &addr, sizeof(addr)) == -1)
-        throw SysError("cannot bind to socket '%1%'", path);
+    bind(fdSocket.get(), path);
 
     if (chmod(path.c_str(), mode) == -1)
         throw SysError("changing permissions on '%1%'", path);
@@ -1715,6 +1695,66 @@ AutoCloseFD createUnixDomainSocket(const Path & path, mode_t mode)
         throw SysError("cannot listen on socket '%1%'", path);
 
     return fdSocket;
+}
+
+
+void bind(int fd, const std::string & path)
+{
+    unlink(path.c_str());
+
+    struct sockaddr_un addr;
+    addr.sun_family = AF_UNIX;
+
+    if (path.size() + 1 >= sizeof(addr.sun_path)) {
+        Pid pid = startProcess([&]() {
+            auto dir = dirOf(path);
+            if (chdir(dir.c_str()) == -1)
+                throw SysError("chdir to '%s' failed", dir);
+            std::string base(baseNameOf(path));
+            if (base.size() + 1 >= sizeof(addr.sun_path))
+                throw Error("socket path '%s' is too long", base);
+            strcpy(addr.sun_path, base.c_str());
+            if (bind(fd, (struct sockaddr *) &addr, sizeof(addr)) == -1)
+                throw SysError("cannot bind to socket '%s'", path);
+            _exit(0);
+        });
+        int status = pid.wait();
+        if (status != 0)
+            throw Error("cannot bind to socket '%s'", path);
+    } else {
+        strcpy(addr.sun_path, path.c_str());
+        if (bind(fd, (struct sockaddr *) &addr, sizeof(addr)) == -1)
+            throw SysError("cannot bind to socket '%s'", path);
+    }
+}
+
+
+void connect(int fd, const std::string & path)
+{
+    struct sockaddr_un addr;
+    addr.sun_family = AF_UNIX;
+
+    if (path.size() + 1 >= sizeof(addr.sun_path)) {
+        Pid pid = startProcess([&]() {
+            auto dir = dirOf(path);
+            if (chdir(dir.c_str()) == -1)
+                throw SysError("chdir to '%s' failed", dir);
+            std::string base(baseNameOf(path));
+            if (base.size() + 1 >= sizeof(addr.sun_path))
+                throw Error("socket path '%s' is too long", base);
+            strcpy(addr.sun_path, base.c_str());
+            if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) == -1)
+                throw SysError("cannot connect to socket at '%s'", path);
+            _exit(0);
+        });
+        int status = pid.wait();
+        if (status != 0)
+            throw Error("cannot connect to socket at '%s'", path);
+    } else {
+        strcpy(addr.sun_path, path.c_str());
+        if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) == -1)
+            throw SysError("cannot connect to socket at '%s'", path);
+    }
 }
 
 
@@ -1727,6 +1767,8 @@ string showBytes(uint64_t bytes)
 // FIXME: move to libstore/build
 void commonChildInit(Pipe & logPipe)
 {
+    logger = makeSimpleLogger();
+
     const static string pathNullDevice = "/dev/null";
     restoreProcessContext();
 

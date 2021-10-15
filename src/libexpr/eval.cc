@@ -445,12 +445,12 @@ EvalState::EvalState(
                     StorePathSet closure;
                     store->computeFSClosure(store->toStorePath(r.second).first, closure);
                     for (auto & path : closure)
-                        allowedPaths->insert(store->printStorePath(path));
+                        allowPath(path);
                 } catch (InvalidPath &) {
-                    allowedPaths->insert(r.second);
+                    allowPath(r.second);
                 }
             } else
-                allowedPaths->insert(r.second);
+                allowPath(r.second);
         }
     }
 
@@ -464,6 +464,35 @@ EvalState::~EvalState()
 {
 }
 
+
+void EvalState::requireExperimentalFeatureOnEvaluation(
+    const std::string & feature,
+    const std::string_view fName,
+    const Pos & pos)
+{
+    if (!settings.isExperimentalFeatureEnabled(feature)) {
+        throw EvalError({
+            .msg = hintfmt(
+                "Cannot call '%2%' because experimental Nix feature '%1%' is disabled. You can enable it via '--extra-experimental-features %1%'.",
+                feature,
+                fName
+            ),
+            .errPos = pos
+        });
+    }
+}
+
+void EvalState::allowPath(const Path & path)
+{
+    if (allowedPaths)
+        allowedPaths->insert(path);
+}
+
+void EvalState::allowPath(const StorePath & storePath)
+{
+    if (allowedPaths)
+        allowedPaths->insert(store->toRealPath(storePath));
+}
 
 Path EvalState::checkSourcePath(const Path & path_)
 {
@@ -895,23 +924,41 @@ void EvalState::evalFile(const Path & path_, Value & v, bool mustBeTrivial)
         return;
     }
 
-    Path path2 = resolveExprPath(path);
-    if ((i = fileEvalCache.find(path2)) != fileEvalCache.end()) {
+    Path resolvedPath = resolveExprPath(path);
+    if ((i = fileEvalCache.find(resolvedPath)) != fileEvalCache.end()) {
         v = i->second;
         return;
     }
 
-    printTalkative("evaluating file '%1%'", path2);
+    printTalkative("evaluating file '%1%'", resolvedPath);
     Expr * e = nullptr;
 
-    auto j = fileParseCache.find(path2);
+    auto j = fileParseCache.find(resolvedPath);
     if (j != fileParseCache.end())
         e = j->second;
 
     if (!e)
-        e = parseExprFromFile(checkSourcePath(path2));
+        e = parseExprFromFile(checkSourcePath(resolvedPath));
 
-    fileParseCache[path2] = e;
+    cacheFile(path, resolvedPath, e, v, mustBeTrivial);
+}
+
+
+void EvalState::resetFileCache()
+{
+    fileEvalCache.clear();
+    fileParseCache.clear();
+}
+
+
+void EvalState::cacheFile(
+    const Path & path,
+    const Path & resolvedPath,
+    Expr * e,
+    Value & v,
+    bool mustBeTrivial)
+{
+    fileParseCache[resolvedPath] = e;
 
     try {
         // Enforce that 'flake.nix' is a direct attrset, not a
@@ -921,19 +968,12 @@ void EvalState::evalFile(const Path & path_, Value & v, bool mustBeTrivial)
             throw EvalError("file '%s' must be an attribute set", path);
         eval(e, v);
     } catch (Error & e) {
-        addErrorTrace(e, "while evaluating the file '%1%':", path2);
+        addErrorTrace(e, "while evaluating the file '%1%':", resolvedPath);
         throw;
     }
 
-    fileEvalCache[path2] = v;
-    if (path != path2) fileEvalCache[path] = v;
-}
-
-
-void EvalState::resetFileCache()
-{
-    fileEvalCache.clear();
-    fileParseCache.clear();
+    fileEvalCache[resolvedPath] = v;
+    if (path != resolvedPath) fileEvalCache[path] = v;
 }
 
 
@@ -1288,13 +1328,13 @@ void EvalState::callFunction(Value & fun, Value & arg, Value & v, const Pos & po
 
     auto size =
         (lambda.arg.empty() ? 0 : 1) +
-        (lambda.matchAttrs ? lambda.formals->formals.size() : 0);
+        (lambda.hasFormals() ? lambda.formals->formals.size() : 0);
     Env & env2(allocEnv(size));
     env2.up = fun.lambda.env;
 
     size_t displ = 0;
 
-    if (!lambda.matchAttrs)
+    if (!lambda.hasFormals())
         env2.values[displ++] = &arg;
 
     else {
@@ -1374,7 +1414,7 @@ void EvalState::autoCallFunction(Bindings & args, Value & fun, Value & res)
         }
     }
 
-    if (!fun.isLambda() || !fun.lambda.fun->matchAttrs) {
+    if (!fun.isLambda() || !fun.lambda.fun->hasFormals()) {
         res = fun;
         return;
     }
@@ -1861,6 +1901,7 @@ string EvalState::copyPathToStore(PathSet & context, const Path & path)
             ? store->computeStorePathForPath(std::string(baseNameOf(path)), checkSourcePath(path)).first
             : store->addToStore(std::string(baseNameOf(path)), checkSourcePath(path), FileIngestionMethod::Recursive, htSHA256, defaultPathFilter, repair);
         dstPath = store->printStorePath(p);
+        allowPath(p);
         srcToStore.insert_or_assign(path, std::move(p));
         printMsg(lvlChatty, "copied source '%1%' -> '%2%'", path, dstPath);
     }

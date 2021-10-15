@@ -17,16 +17,14 @@
 #include <regex>
 #include <queue>
 
-#include <sys/types.h>
-#include <sys/socket.h>
 #include <sys/un.h>
-#include <netdb.h>
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/utsname.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 
 #if HAVE_STATVFS
 #include <sys/statvfs.h>
@@ -34,7 +32,6 @@
 
 /* Includes required for chroot support. */
 #if __linux__
-#include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
 #include <netinet/ip.h>
@@ -70,12 +67,14 @@ void handleDiffHook(
     auto diffHook = settings.diffHook;
     if (diffHook != "" && settings.runDiffHook) {
         try {
-            RunOptions diffHookOptions(diffHook,{tryA, tryB, drvPath, tmpDir});
-            diffHookOptions.searchPath = true;
-            diffHookOptions.uid = uid;
-            diffHookOptions.gid = gid;
-            diffHookOptions.chdir = "/";
-            auto diffRes = runProgram(diffHookOptions);
+            auto diffRes = runProgram(RunOptions {
+                .program = diffHook,
+                .searchPath = true,
+                .args = {tryA, tryB, drvPath, tmpDir},
+                .uid = uid,
+                .gid = gid,
+                .chdir = "/"
+            });
             if (!statusOk(diffRes.first))
                 throw ExecError(diffRes.first,
                     "diff-hook program '%1%' %2%",
@@ -344,23 +343,6 @@ int childEntry(void * arg)
 }
 
 
-static std::once_flag dns_resolve_flag;
-
-static void preloadNSS() {
-    /* builtin:fetchurl can trigger a DNS lookup, which with glibc can trigger a dynamic library load of
-       one of the glibc NSS libraries in a sandboxed child, which will fail unless the library's already
-       been loaded in the parent. So we force a lookup of an invalid domain to force the NSS machinery to
-       load its lookup libraries in the parent before any child gets a chance to. */
-    std::call_once(dns_resolve_flag, []() {
-        struct addrinfo *res = NULL;
-
-        if (getaddrinfo("this.pre-initializes.the.dns.resolvers.invalid.", "http", NULL, &res) != 0) {
-            if (res) freeaddrinfo(res);
-        }
-    });
-}
-
-
 static void linkOrCopy(const Path & from, const Path & to)
 {
     if (link(from.c_str(), to.c_str()) == -1) {
@@ -388,9 +370,6 @@ void LocalDerivationGoal::startBuilder()
             worker.store.printStorePath(drvPath),
             settings.thisSystem,
             concatStringsSep<StringSet>(", ", worker.store.systemFeatures));
-
-    if (drv->isBuiltin())
-        preloadNSS();
 
 #if __APPLE__
     additionalSandboxProfile = parsedDrv->getStringAttr("__sandboxProfile").value_or("");
@@ -732,6 +711,7 @@ void LocalDerivationGoal::startBuilder()
     if (!builderOut.readSide)
         throw SysError("opening pseudoterminal master");
 
+    // FIXME: not thread-safe, use ptsname_r
     std::string slaveName(ptsname(builderOut.readSide.get()));
 
     if (buildUser) {
@@ -775,7 +755,6 @@ void LocalDerivationGoal::startBuilder()
     result.startTime = time(0);
 
     /* Fork a child to build the package. */
-    ProcessOptions options;
 
 #if __linux__
     if (useChroot) {
@@ -817,8 +796,6 @@ void LocalDerivationGoal::startBuilder()
             privateNetwork = true;
 
         userNamespaceSync.create();
-
-        options.allowVfork = false;
 
         Path maxUserNamespaces = "/proc/sys/user/max_user_namespaces";
         static bool userNamespacesEnabled =
@@ -877,7 +854,7 @@ void LocalDerivationGoal::startBuilder()
             writeFull(builderOut.writeSide.get(),
                 fmt("%d %d\n", usingUserNamespace, child));
             _exit(0);
-        }, options);
+        });
 
         int res = helper.wait();
         if (res != 0 && settings.sandboxFallback) {
@@ -941,10 +918,9 @@ void LocalDerivationGoal::startBuilder()
 #endif
     {
     fallback:
-        options.allowVfork = !buildUser && !drv->isBuiltin();
         pid = startProcess([&]() {
             runChild();
-        }, options);
+        });
     }
 
     /* parent */
@@ -959,9 +935,12 @@ void LocalDerivationGoal::startBuilder()
             try {
                 return readLine(builderOut.readSide.get());
             } catch (Error & e) {
-                e.addTrace({}, "while waiting for the build environment to initialize (previous messages: %s)",
+                auto status = pid.wait();
+                e.addTrace({}, "while waiting for the build environment for '%s' to initialize (%s, previous messages: %s)",
+                    worker.store.printStorePath(drvPath),
+                    statusToString(status),
                     concatStringsSep("|", msgs));
-                throw e;
+                throw;
             }
         }();
         if (string(msg, 0, 1) == "\2") break;
@@ -1112,10 +1091,10 @@ void LocalDerivationGoal::writeStructuredAttrs()
 static StorePath pathPartOfReq(const DerivedPath & req)
 {
     return std::visit(overloaded {
-        [&](DerivedPath::Opaque bo) {
+        [&](const DerivedPath::Opaque & bo) {
             return bo.path;
         },
-        [&](DerivedPath::Built bfd)  {
+        [&](const DerivedPath::Built & bfd)  {
             return bfd.drvPath;
         },
     }, req.raw());
@@ -1853,7 +1832,7 @@ void LocalDerivationGoal::runChild()
         /* Fill in the arguments. */
         Strings args;
 
-        const char *builder = "invalid";
+        std::string builder = "invalid";
 
         if (drv->isBuiltin()) {
             ;
@@ -1979,13 +1958,13 @@ void LocalDerivationGoal::runChild()
                 }
                 args.push_back(drv->builder);
             } else {
-                builder = drv->builder.c_str();
+                builder = drv->builder;
                 args.push_back(std::string(baseNameOf(drv->builder)));
             }
         }
 #else
         else {
-            builder = drv->builder.c_str();
+            builder = drv->builder;
             args.push_back(std::string(baseNameOf(drv->builder)));
         }
 #endif
@@ -2041,9 +2020,9 @@ void LocalDerivationGoal::runChild()
             posix_spawnattr_setbinpref_np(&attrp, 1, &cpu, NULL);
         }
 
-        posix_spawn(NULL, builder, NULL, &attrp, stringsToCharPtrs(args).data(), stringsToCharPtrs(envStrs).data());
+        posix_spawn(NULL, builder.c_str(), NULL, &attrp, stringsToCharPtrs(args).data(), stringsToCharPtrs(envStrs).data());
 #else
-        execve(builder, stringsToCharPtrs(args).data(), stringsToCharPtrs(envStrs).data());
+        execve(builder.c_str(), stringsToCharPtrs(args).data(), stringsToCharPtrs(envStrs).data());
 #endif
 
         throw SysError("executing '%1%'", drv->builder);
@@ -2158,8 +2137,7 @@ void LocalDerivationGoal::registerOutputs()
 
         /* Pass blank Sink as we are not ready to hash data at this stage. */
         NullSink blank;
-        auto references = worker.store.parseStorePathSet(
-            scanForReferences(blank, actualPath, worker.store.printStorePathSet(referenceablePaths)));
+        auto references = scanForReferences(blank, actualPath, referenceablePaths);
 
         outputReferencesIfUnregistered.insert_or_assign(
             outputName,
@@ -2173,8 +2151,8 @@ void LocalDerivationGoal::registerOutputs()
                 /* Since we'll use the already installed versions of these, we
                    can treat them as leaves and ignore any references they
                    have. */
-                [&](AlreadyRegistered _) { return StringSet {}; },
-                [&](PerhapsNeedToRegister refs) {
+                [&](const AlreadyRegistered &) { return StringSet {}; },
+                [&](const PerhapsNeedToRegister & refs) {
                     StringSet referencedOutputs;
                     /* FIXME build inverted map up front so no quadratic waste here */
                     for (auto & r : refs.refs)
@@ -2210,11 +2188,11 @@ void LocalDerivationGoal::registerOutputs()
         };
 
         std::optional<StorePathSet> referencesOpt = std::visit(overloaded {
-            [&](AlreadyRegistered skippedFinalPath) -> std::optional<StorePathSet> {
+            [&](const AlreadyRegistered & skippedFinalPath) -> std::optional<StorePathSet> {
                 finish(skippedFinalPath.path);
                 return std::nullopt;
             },
-            [&](PerhapsNeedToRegister r) -> std::optional<StorePathSet> {
+            [&](const PerhapsNeedToRegister & r) -> std::optional<StorePathSet> {
                 return r.refs;
             },
         }, outputReferencesIfUnregistered.at(outputName));
@@ -2226,7 +2204,7 @@ void LocalDerivationGoal::registerOutputs()
         auto rewriteOutput = [&]() {
             /* Apply hash rewriting if necessary. */
             if (!outputRewrites.empty()) {
-                warn("rewriting hashes in '%1%'; cross fingers", actualPath);
+                debug("rewriting hashes in '%1%'; cross fingers", actualPath);
 
                 /* FIXME: this is in-memory. */
                 StringSink sink;
@@ -2330,7 +2308,7 @@ void LocalDerivationGoal::registerOutputs()
         };
 
         ValidPathInfo newInfo = std::visit(overloaded {
-            [&](DerivationOutputInputAddressed output) {
+            [&](const DerivationOutputInputAddressed & output) {
                 /* input-addressed case */
                 auto requiredFinalPath = output.path;
                 /* Preemptively add rewrite rule for final hash, as that is
@@ -2349,14 +2327,14 @@ void LocalDerivationGoal::registerOutputs()
                     newInfo0.references.insert(newInfo0.path);
                 return newInfo0;
             },
-            [&](DerivationOutputCAFixed dof) {
+            [&](const DerivationOutputCAFixed & dof) {
                 auto newInfo0 = newInfoFromCA(DerivationOutputCAFloating {
                     .method = dof.hash.method,
                     .hashType = dof.hash.hash.type,
                 });
 
                 /* Check wanted hash */
-                Hash & wanted = dof.hash.hash;
+                const Hash & wanted = dof.hash.hash;
                 assert(newInfo0.ca);
                 auto got = getContentAddressHash(*newInfo0.ca);
                 if (wanted != got) {
@@ -2492,7 +2470,13 @@ void LocalDerivationGoal::registerOutputs()
         infos.emplace(outputName, std::move(newInfo));
     }
 
-    if (buildMode == bmCheck) return;
+    if (buildMode == bmCheck) {
+        // In case of FOD mismatches on `--check` an error must be thrown as this is also
+        // a source for non-determinism.
+        if (delayedException)
+            std::rethrow_exception(delayedException);
+        return;
+    }
 
     /* Apply output checks. */
     checkOutputs(infos);

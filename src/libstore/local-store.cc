@@ -679,7 +679,7 @@ void LocalStore::checkDerivationOutputs(const StorePath & drvPath, const Derivat
     std::optional<Hash> h;
     for (auto & i : drv.outputs) {
         std::visit(overloaded {
-            [&](DerivationOutputInputAddressed doia) {
+            [&](const DerivationOutputInputAddressed & doia) {
                 if (!h) {
                     // somewhat expensive so we do lazily
                     auto temp = hashDerivationModulo(*this, drv, true);
@@ -691,14 +691,14 @@ void LocalStore::checkDerivationOutputs(const StorePath & drvPath, const Derivat
                         printStorePath(drvPath), printStorePath(doia.path), printStorePath(recomputed));
                 envHasRightPath(doia.path, i.first);
             },
-            [&](DerivationOutputCAFixed dof) {
+            [&](const DerivationOutputCAFixed & dof) {
                 StorePath path = makeFixedOutputPath(dof.hash.method, dof.hash.hash, drvName);
                 envHasRightPath(path, i.first);
             },
-            [&](DerivationOutputCAFloating _) {
+            [&](const DerivationOutputCAFloating &) {
                 /* Nothing to check */
             },
-            [&](DerivationOutputDeferred) {
+            [&](const DerivationOutputDeferred &) {
             },
         }, i.second.output);
     }
@@ -1241,11 +1241,6 @@ void LocalStore::addToStore(const ValidPathInfo & info, Source & source,
         if (repair || !isValidPath(info.path)) {
 
             deletePath(realPath);
-
-            // text hashing has long been allowed to have non-self-references because it is used for drv files.
-            bool refersToSelf = info.references.count(info.path) > 0;
-            if (info.ca.has_value() && !info.references.empty() && !(std::holds_alternative<TextHash>(*info.ca) && !refersToSelf))
-                settings.requireExperimentalFeature("ca-references");
 
             /* While restoring the path from the NAR, compute the hash
                of the NAR. */

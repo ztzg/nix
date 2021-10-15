@@ -140,10 +140,25 @@ public:
         std::shared_ptr<Store> buildStore = nullptr);
     ~EvalState();
 
+    void requireExperimentalFeatureOnEvaluation(
+        const std::string & feature,
+        const std::string_view fName,
+        const Pos & pos
+    );
+
     void addToSearchPath(const string & s);
 
     SearchPath getSearchPath() { return searchPath; }
 
+    /* Allow access to a path. */
+    void allowPath(const Path & path);
+
+    /* Allow access to a store path. Note that this gets remapped to
+       the real store path if `store` is a chroot store. */
+    void allowPath(const StorePath & storePath);
+
+    /* Check whether access to a path is allowed and throw an error if
+       not. Otherwise return the canonicalised path. */
     Path checkSourcePath(const Path & path);
 
     void checkURI(const std::string & uri);
@@ -171,6 +186,14 @@ public:
        form. Optionally enforce that the top-level expression is
        trivial (i.e. doesn't require arbitrary computation). */
     void evalFile(const Path & path, Value & v, bool mustBeTrivial = false);
+
+    /* Like `cacheFile`, but with an already parsed expression. */
+    void cacheFile(
+        const Path & path,
+        const Path & resolvedPath,
+        Expr * e,
+        Value & v,
+        bool mustBeTrivial = false);
 
     void resetFileCache();
 

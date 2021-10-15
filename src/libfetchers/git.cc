@@ -13,6 +13,12 @@ using namespace std::string_literals;
 
 namespace nix::fetchers {
 
+// Explicit initial branch of our bare repo to suppress warnings from new version of git.
+// The value itself does not matter, since we always fetch a specific revision or branch.
+// It is set with `-c init.defaultBranch=` instead of `--initial-branch=` to stay compatible with
+// old version of git, which will ignore unrecognized `-c` options.
+const std::string gitInitialBranch = "__nix_dummy_branch";
+
 static std::string readHead(const Path & path)
 {
     return chomp(runProgram("git", true, { "-C", path, "rev-parse", "--abbrev-ref", "HEAD" }));
@@ -173,7 +179,7 @@ struct GitInputScheme : InputScheme
         std::string name = input.getName();
 
         bool shallow = maybeGetBoolAttr(input.attrs, "shallow").value_or(false);
-        bool submodules = maybeGetBoolAttr(input.attrs, "submodules").value_or(true);
+        bool submodules = maybeGetBoolAttr(input.attrs, "submodules").value_or(false);
         bool allRefs = maybeGetBoolAttr(input.attrs, "allRefs").value_or(false);
 
         std::string cacheType = "git";
@@ -324,7 +330,7 @@ struct GitInputScheme : InputScheme
             lockFile(lock.get(), ltWrite, true);
 
             if (!pathExists(cacheDir)) {
-                runProgram("git", true, { "init", "--bare", repoDir });
+                runProgram("git", true, { "-c", "init.defaultBranch=" + gitInitialBranch, "init", "--bare", repoDir });
             }
 
             deleteLockFile(cacheDirLock, lock.get());
@@ -413,17 +419,14 @@ struct GitInputScheme : InputScheme
         AutoDelete delTmpDir(tmpDir, true);
         PathFilter filter = defaultPathFilter;
 
-        RunOptions checkCommitOpts(
-            "git",
-            { "-C", repoDir, "cat-file", "commit", input.getRev()->gitRev() }
-        );
-        checkCommitOpts.searchPath = true;
-        checkCommitOpts.mergeStderrToStdout = true;
-
-        auto result = runProgram(checkCommitOpts);
+        auto result = runProgram(RunOptions {
+            .program = "git",
+            .args = { "-C", repoDir, "cat-file", "commit", input.getRev()->gitRev() },
+            .mergeStderrToStdout = true
+        });
         if (WEXITSTATUS(result.first) == 128
-            && result.second.find("bad file") != std::string::npos
-        ) {
+            && result.second.find("bad file") != std::string::npos)
+        {
             throw Error(
                 "Cannot find Git revision '%s' in ref '%s' of repository '%s'! "
                     "Please make sure that the " ANSI_BOLD "rev" ANSI_NORMAL " exists on the "
@@ -439,7 +442,7 @@ struct GitInputScheme : InputScheme
             Path tmpGitDir = createTempDir();
             AutoDelete delTmpGitDir(tmpGitDir, true);
 
-            runProgram("git", true, { "init", tmpDir, "--separate-git-dir", tmpGitDir });
+            runProgram("git", true, { "-c", "init.defaultBranch=" + gitInitialBranch, "init", tmpDir, "--separate-git-dir", tmpGitDir });
             // TODO: repoDir might lack the ref (it only checks if rev
             // exists, see FIXME above) so use a big hammer and fetch
             // everything to ensure we get the rev.
@@ -455,9 +458,11 @@ struct GitInputScheme : InputScheme
             // FIXME: should pipe this, or find some better way to extract a
             // revision.
             auto source = sinkToSource([&](Sink & sink) {
-                RunOptions gitOptions("git", { "-C", repoDir, "archive", input.getRev()->gitRev() });
-                gitOptions.standardOut = &sink;
-                runProgram2(gitOptions);
+                runProgram2({
+                    .program = "git",
+                    .args = { "-C", repoDir, "archive", input.getRev()->gitRev() },
+                    .standardOut = &sink
+                });
             });
 
             unpackTarfile(*source, tmpDir);

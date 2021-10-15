@@ -34,6 +34,7 @@ nix_tests = \
   shell.sh \
   brotli.sh \
   zstd.sh \
+  compression-levels.sh \
   pure-eval.sh \
   check.sh \
   plugins.sh \

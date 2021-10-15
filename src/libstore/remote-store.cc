@@ -162,8 +162,19 @@ void RemoteStore::initConnection(Connection & conn)
     try {
         conn.to << WORKER_MAGIC_1;
         conn.to.flush();
-        unsigned int magic = readInt(conn.from);
-        if (magic != WORKER_MAGIC_2) throw Error("protocol mismatch");
+        StringSink saved;
+        try {
+            TeeSource tee(conn.from, saved);
+            unsigned int magic = readInt(tee);
+            if (magic != WORKER_MAGIC_2)
+                throw Error("protocol mismatch");
+        } catch (SerialisationError & e) {
+            /* In case the other side is waiting for our input, close
+               it. */
+            conn.closeWrite();
+            auto msg = conn.from.drain();
+            throw Error("protocol mismatch, got '%s'", chomp(*saved.s + msg));
+        }
 
         conn.from >> conn.daemonVersion;
         if (GET_PROTOCOL_MAJOR(conn.daemonVersion) != GET_PROTOCOL_MAJOR(PROTOCOL_VERSION))
@@ -517,13 +528,13 @@ ref<const ValidPathInfo> RemoteStore::addCAToStore(
         if (repair) throw Error("repairing is not supported when building through the Nix daemon protocol < 1.25");
 
         std::visit(overloaded {
-            [&](TextHashMethod thm) -> void {
+            [&](const TextHashMethod & thm) -> void {
                 std::string s = dump.drain();
                 conn->to << wopAddTextToStore << name << s;
                 worker_proto::write(*this, conn->to, references);
                 conn.processStderr();
             },
-            [&](FixedOutputHashMethod fohm) -> void {
+            [&](const FixedOutputHashMethod & fohm) -> void {
                 conn->to
                     << wopAddToStore
                     << name
@@ -694,10 +705,10 @@ static void writeDerivedPaths(RemoteStore & store, ConnectionHandle & conn, cons
         for (auto & p : reqs) {
             auto sOrDrvPath = StorePathWithOutputs::tryFromDerivedPath(p);
             std::visit(overloaded {
-                [&](StorePathWithOutputs s) {
+                [&](const StorePathWithOutputs & s) {
                     ss.push_back(s.to_string(store));
                 },
-                [&](StorePath drvPath) {
+                [&](const StorePath & drvPath) {
                     throw Error("trying to request '%s', but daemon protocol %d.%d is too old (< 1.29) to request a derivation file",
                         store.printStorePath(drvPath),
                         GET_PROTOCOL_MAJOR(conn->daemonVersion),

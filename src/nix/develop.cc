@@ -9,6 +9,7 @@
 #include "progress-bar.hh"
 #include "run.hh"
 
+#include <memory>
 #include <nlohmann/json.hpp>
 
 using namespace nix;
@@ -392,6 +393,12 @@ struct CmdDevelop : Common, MixEnvironment
         });
 
         addFlag({
+            .longName = "unpack",
+            .description = "Run the `unpack` phase.",
+            .handler = {&phase, {"unpack"}},
+        });
+
+        addFlag({
             .longName = "configure",
             .description = "Run the `configure` phase.",
             .handler = {&phase, {"configure"}},
@@ -504,6 +511,20 @@ struct CmdDevelop : Common, MixEnvironment
         // Ctrl-C, so don't pass --rcfile
         auto args = phase || !command.empty() ? Strings{std::string(baseNameOf(shell)), rcFilePath}
             : Strings{std::string(baseNameOf(shell)), "--rcfile", rcFilePath};
+
+        // Need to chdir since phases assume in flake directory
+        if (phase) {
+            // chdir if installable is a flake of type git+file or path
+            auto installableFlake = std::dynamic_pointer_cast<InstallableFlake>(installable);
+            if (installableFlake) {
+                auto sourcePath = installableFlake->getLockedFlake()->flake.resolvedRef.input.getSourcePath();
+                if (sourcePath) {
+                    if (chdir(sourcePath->c_str()) == -1) {
+                        throw SysError("chdir to '%s' failed", *sourcePath);
+                    }
+                }
+            }
+        }
 
         runProgramInStore(store, shell, args);
     }

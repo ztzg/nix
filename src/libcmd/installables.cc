@@ -697,13 +697,13 @@ std::shared_ptr<Installable> SourceExprCommand::parseInstallable(
 BuiltPaths getBuiltPaths(ref<Store> evalStore, ref<Store> store, const DerivedPaths & hopefullyBuiltPaths)
 {
     BuiltPaths res;
-    for (auto & b : hopefullyBuiltPaths)
+    for (const auto & b : hopefullyBuiltPaths)
         std::visit(
             overloaded{
-                [&](DerivedPath::Opaque bo) {
+                [&](const DerivedPath::Opaque & bo) {
                     res.push_back(BuiltPath::Opaque{bo.path});
                 },
-                [&](DerivedPath::Built bfd) {
+                [&](const DerivedPath::Built & bfd) {
                     OutputPathMap outputs;
                     auto drv = evalStore->readDerivation(bfd.drvPath);
                     auto outputHashes = staticOutputHashes(*evalStore, drv); // FIXME: expensive
@@ -743,8 +743,12 @@ BuiltPaths getBuiltPaths(ref<Store> evalStore, ref<Store> store, const DerivedPa
     return res;
 }
 
-BuiltPaths build(ref<Store> evalStore, ref<Store> store, Realise mode,
-    std::vector<std::shared_ptr<Installable>> installables, BuildMode bMode)
+BuiltPaths build(
+    ref<Store> evalStore,
+    ref<Store> store,
+    Realise mode,
+    const std::vector<std::shared_ptr<Installable>> & installables,
+    BuildMode bMode)
 {
     if (mode == Realise::Nothing)
         settings.readOnlyMode = true;
@@ -769,7 +773,7 @@ BuiltPaths toBuiltPaths(
     ref<Store> store,
     Realise mode,
     OperateOn operateOn,
-    std::vector<std::shared_ptr<Installable>> installables)
+    const std::vector<std::shared_ptr<Installable>> & installables)
 {
     if (operateOn == OperateOn::Output)
         return build(evalStore, store, mode, installables);
@@ -788,7 +792,7 @@ StorePathSet toStorePaths(
     ref<Store> evalStore,
     ref<Store> store,
     Realise mode, OperateOn operateOn,
-    std::vector<std::shared_ptr<Installable>> installables)
+    const std::vector<std::shared_ptr<Installable>> & installables)
 {
     StorePathSet outPaths;
     for (auto & path : toBuiltPaths(evalStore, store, mode, operateOn, installables)) {
@@ -812,15 +816,17 @@ StorePath toStorePath(
     return *paths.begin();
 }
 
-StorePathSet toDerivations(ref<Store> store,
-    std::vector<std::shared_ptr<Installable>> installables, bool useDeriver)
+StorePathSet toDerivations(
+    ref<Store> store,
+    const std::vector<std::shared_ptr<Installable>> & installables,
+    bool useDeriver)
 {
     StorePathSet drvPaths;
 
-    for (auto & i : installables)
-        for (auto & b : i->toDerivedPaths())
+    for (const auto & i : installables)
+        for (const auto & b : i->toDerivedPaths())
             std::visit(overloaded {
-                [&](DerivedPath::Opaque bo) {
+                [&](const DerivedPath::Opaque & bo) {
                     if (!useDeriver)
                         throw Error("argument '%s' did not evaluate to a derivation", i->what());
                     auto derivers = store->queryValidDerivers(bo.path);
@@ -829,7 +835,7 @@ StorePathSet toDerivations(ref<Store> store,
                     // FIXME: use all derivers?
                     drvPaths.insert(*derivers.begin());
                 },
-                [&](DerivedPath::Built bfd) {
+                [&](const DerivedPath::Built & bfd) {
                     drvPaths.insert(bfd.drvPath);
                 },
             }, b.raw());

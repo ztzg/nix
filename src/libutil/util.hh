@@ -262,10 +262,10 @@ void killUser(uid_t uid);
    pid to the caller. */
 struct ProcessOptions
 {
-    string errorPrefix = "error: ";
+    string errorPrefix = "";
     bool dieWithParent = true;
     bool runExitHandlers = false;
-    bool allowVfork = true;
+    bool allowVfork = false;
 };
 
 pid_t startProcess(std::function<void()> fun, const ProcessOptions & options = ProcessOptions());
@@ -279,26 +279,20 @@ string runProgram(Path program, bool searchPath = false,
 
 struct RunOptions
 {
+    Path program;
+    bool searchPath = true;
+    Strings args;
     std::optional<uid_t> uid;
     std::optional<uid_t> gid;
     std::optional<Path> chdir;
     std::optional<std::map<std::string, std::string>> environment;
-    Path program;
-    bool searchPath = true;
-    Strings args;
     std::optional<std::string> input;
     Source * standardIn = nullptr;
     Sink * standardOut = nullptr;
     bool mergeStderrToStdout = false;
-    bool _killStderr = false;
-
-    RunOptions(const Path & program, const Strings & args)
-        : program(program), args(args) { };
-
-    RunOptions & killStderr(bool v) { _killStderr = true; return *this; }
 };
 
-std::pair<int, std::string> runProgram(const RunOptions & options);
+std::pair<int, std::string> runProgram(RunOptions && options);
 
 void runProgram2(const RunOptions & options);
 
@@ -582,6 +576,12 @@ void commonChildInit(Pipe & logPipe);
 
 /* Create a Unix domain socket in listen mode. */
 AutoCloseFD createUnixDomainSocket(const Path & path, mode_t mode);
+
+/* Bind a Unix domain socket to a path. */
+void bind(int fd, const std::string & path);
+
+/* Connect to a Unix domain socket. */
+void connect(int fd, const std::string & path);
 
 
 // A Rust/Python-like enumerate() iterator adapter.

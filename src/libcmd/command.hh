@@ -169,7 +169,7 @@ public:
 
     using StoreCommand::run;
 
-    virtual void run(ref<Store> store, BuiltPaths paths) = 0;
+    virtual void run(ref<Store> store, BuiltPaths && paths) = 0;
 
     void run(ref<Store> store) override;
 
@@ -182,9 +182,9 @@ struct StorePathsCommand : public BuiltPathsCommand
 
     using BuiltPathsCommand::run;
 
-    virtual void run(ref<Store> store, std::vector<StorePath> storePaths) = 0;
+    virtual void run(ref<Store> store, std::vector<StorePath> && storePaths) = 0;
 
-    void run(ref<Store> store, BuiltPaths paths) override;
+    void run(ref<Store> store, BuiltPaths && paths) override;
 };
 
 /* A command that operates on exactly one store path. */
@@ -194,7 +194,7 @@ struct StorePathCommand : public StorePathsCommand
 
     virtual void run(ref<Store> store, const StorePath & storePath) = 0;
 
-    void run(ref<Store> store, std::vector<StorePath> storePaths) override;
+    void run(ref<Store> store, std::vector<StorePath> && storePaths) override;
 };
 
 /* A helper class for registering commands globally. */
@@ -225,15 +225,18 @@ static RegisterCommand registerCommand2(std::vector<std::string> && name)
     return RegisterCommand(std::move(name), [](){ return make_ref<T>(); });
 }
 
-BuiltPaths build(ref<Store> evalStore, ref<Store> store, Realise mode,
-    std::vector<std::shared_ptr<Installable>> installables, BuildMode bMode = bmNormal);
+BuiltPaths build(
+    ref<Store> evalStore,
+    ref<Store> store, Realise mode,
+    const std::vector<std::shared_ptr<Installable>> & installables,
+    BuildMode bMode = bmNormal);
 
 std::set<StorePath> toStorePaths(
     ref<Store> evalStore,
     ref<Store> store,
     Realise mode,
     OperateOn operateOn,
-    std::vector<std::shared_ptr<Installable>> installables);
+    const std::vector<std::shared_ptr<Installable>> & installables);
 
 StorePath toStorePath(
     ref<Store> evalStore,
@@ -242,8 +245,9 @@ StorePath toStorePath(
     OperateOn operateOn,
     std::shared_ptr<Installable> installable);
 
-std::set<StorePath> toDerivations(ref<Store> store,
-    std::vector<std::shared_ptr<Installable>> installables,
+std::set<StorePath> toDerivations(
+    ref<Store> store,
+    const std::vector<std::shared_ptr<Installable>> & installables,
     bool useDeriver = false);
 
 BuiltPaths toBuiltPaths(
@@ -251,7 +255,7 @@ BuiltPaths toBuiltPaths(
     ref<Store> store,
     Realise mode,
     OperateOn operateOn,
-    std::vector<std::shared_ptr<Installable>> installables);
+    const std::vector<std::shared_ptr<Installable>> & installables);
 
 /* Helper function to generate args that invoke $EDITOR on
    filename:lineno. */

@@ -774,9 +774,6 @@ void runPostBuildHook(
     hookEnvironment.emplace("OUT_PATHS", chomp(concatStringsSep(" ", store.printStorePathSet(outputPaths))));
     hookEnvironment.emplace("NIX_CONFIG", globalConfig.toKeyValue());
 
-    RunOptions opts(settings.postBuildHook, {});
-    opts.environment = hookEnvironment;
-
     struct LogSink : Sink {
         Activity & act;
         std::string currentLine;
@@ -807,9 +804,12 @@ void runPostBuildHook(
     };
     LogSink sink(act);
 
-    opts.standardOut = &sink;
-    opts.mergeStderrToStdout = true;
-    runProgram2(opts);
+    runProgram2({
+        .program = settings.postBuildHook,
+        .environment = hookEnvironment,
+        .standardOut = &sink,
+        .mergeStderrToStdout = true,
+    });
 }
 
 void DerivationGoal::buildDone()
@@ -1009,7 +1009,7 @@ HookReply DerivationGoal::tryBuildHook()
                     return readLine(worker.hook->fromHook.readSide.get());
                 } catch (Error & e) {
                     e.addTrace({}, "while reading the response from the build hook");
-                    throw e;
+                    throw;
                 }
             }();
             if (handleJSONLogMessage(s, worker.act, worker.hook->activities, true))
@@ -1055,7 +1055,7 @@ HookReply DerivationGoal::tryBuildHook()
         machineName = readLine(hook->fromHook.readSide.get());
     } catch (Error & e) {
         e.addTrace({}, "while reading the machine name from the build hook");
-        throw e;
+        throw;
     }
 
     /* Tell the hook all the inputs that have to be copied to the
