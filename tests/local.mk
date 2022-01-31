@@ -94,7 +94,8 @@ nix_tests = \
   describe-stores.sh \
   nix-profile.sh \
   suggestions.sh \
-  store-ping.sh
+  store-ping.sh \
+  impure-derivations.sh
 
 ifeq ($(HAVE_LIBCPUID), 1)
 	nix_tests += compute-levels.sh

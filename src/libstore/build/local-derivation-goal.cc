@@ -2393,6 +2393,13 @@ DrvOutputs LocalDerivationGoal::registerOutputs()
                 assert(false);
             },
 
+            [&](DerivationOutputImpure & doi) {
+                return newInfoFromCA(DerivationOutputCAFloating {
+                    .method = doi.method,
+                    .hashType = doi.hashType,
+                });
+            },
+
         }, output.output);
 
         /* FIXME: set proper permissions in restorePath() so
@@ -2603,7 +2610,9 @@ DrvOutputs LocalDerivationGoal::registerOutputs()
             },
             .outPath = newInfo.path
         };
-        if (settings.isExperimentalFeatureEnabled(Xp::CaDerivations)) {
+        if (settings.isExperimentalFeatureEnabled(Xp::CaDerivations)
+            && drv->type() != DerivationType::Impure)
+        {
             signRealisation(thisRealisation);
             worker.store.registerDrvOutput(thisRealisation);
         }
