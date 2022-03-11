@@ -348,9 +348,11 @@ void DerivationGoal::gaveUpOnSubstitution()
     inputDrvOutputs.clear();
     if (useDerivation)
         for (auto & i : dynamic_cast<Derivation *>(drv.get())->inputDrvs) {
-            /* Ensure that pure derivations don't depend on impure
-               derivations. */
-            if (drv->type() != DerivationType::Impure) {
+            /* Ensure that pure, non-fixed-output derivations don't
+               depend on impure derivations. */
+            if (drv->type() != DerivationType::Impure
+                && drv->type() != DerivationType::CAFixed)
+            {
                 auto inputDrv = worker.evalStore.readDerivation(i.first);
                 if (inputDrv.type() == DerivationType::Impure)
                     throw Error("pure derivation '%s' depends on impure derivation '%s'",
@@ -978,7 +980,8 @@ void DerivationGoal::resolvedFinished()
             newRealisation.id = DrvOutput { initialOutputs.at(wantedOutput).outputHash, wantedOutput };
             newRealisation.signatures.clear();
             if (drv->type() != DerivationType::Impure) {
-                newRealisation.dependentRealisations = drvOutputReferences(worker.store, *drv, realisation.outPath);
+                if (drv->type() != DerivationType::CAFixed)
+                    newRealisation.dependentRealisations = drvOutputReferences(worker.store, *drv, realisation.outPath);
                 signRealisation(newRealisation);
                 worker.store.registerDrvOutput(newRealisation);
             }
