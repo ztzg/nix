@@ -370,6 +370,12 @@ struct curlFileTransfer : public FileTransfer
             if (writtenToSink)
                 curl_easy_setopt(req, CURLOPT_RESUME_FROM_LARGE, writtenToSink);
 
+            if (!request.sslCert.empty())
+                curl_easy_setopt(req, CURLOPT_SSLCERT, request.sslCert.c_str());
+
+            if (!request.sslKey.empty())
+                curl_easy_setopt(req, CURLOPT_SSLKEY, request.sslKey.c_str());
+
             result.data.clear();
             result.bodySize = 0;
         }
