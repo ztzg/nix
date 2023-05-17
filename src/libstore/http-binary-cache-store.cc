@@ -143,11 +143,26 @@ protected:
 
     FileTransferRequest makeRequest(const std::string & path)
     {
-        return FileTransferRequest(
-            hasPrefix(path, "https://") || hasPrefix(path, "http://") || hasPrefix(path, "file://")
+        bool absolute = hasPrefix(path, "https://") || hasPrefix(path, "http://") || hasPrefix(path, "file://");
+
+        FileTransferRequest request(
+            absolute
             ? path
             : cacheUri + "/" + path);
 
+        if (!absolute) {
+            if (!sslCert.get().empty()) {
+                debug("configuring SSL client certificate '%s' for '%s'", sslCert, request.uri);
+                request.sslCert = sslCert;
+            }
+
+            if (!sslKey.get().empty()) {
+                debug("configuring SSL client certificate key '%s' for '%s'", sslKey, request.uri);
+                request.sslKey = sslKey;
+            }
+        }
+
+        return request;
     }
 
     void getFile(const std::string & path, Sink & sink) override

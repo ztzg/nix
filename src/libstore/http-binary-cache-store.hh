@@ -10,6 +10,10 @@ struct HttpBinaryCacheStoreConfig : virtual BinaryCacheStoreConfig
 
     Path cacheUri;
 
+    const Setting<std::string> sslCert{this, "", "ssl-cert", "An optional SSL client certificate in PEM format; see CURLOPT_SSLCERT."};
+
+    const Setting<std::string> sslKey{this, "", "ssl-key", "The SSL client certificate key in PEM format; see CURLOPT_SSLKEY."};
+
     const std::string name() override
     {
         return "HTTP Binary Cache Store";
